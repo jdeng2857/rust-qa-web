@@ -5,6 +5,7 @@ use warp::{
     Filter, 
     http::Method, 
     filters::{
+        body::BodyDeserializeError, cors::CorsForbidden},
         cors::CorsForbidden,
     }, 
     reject::Reject, 
@@ -26,6 +27,16 @@ struct Question {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 struct QuestionId(String);
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+struct AnswerId(String);
+
+#[derive(Deserialize, Debug, Clone, Serialize)]
+struct Answer {
+    id: AnswerId,
+    content: String,
+    question_id: QuestionId,
+}
+
 #[derive(Debug)]
 struct InvalidId;
 impl Reject for InvalidId {}
@@ -33,6 +44,7 @@ impl Reject for InvalidId {}
 #[derive(Clone)]
 struct Store {
     questions: Arc<RwLock<HashMap<QuestionId, Question>>>,
+    answers: Arc<RwLock<HashMap<AnswerId, Answer>>>,
 }
 
 impl Store {
@@ -66,22 +78,6 @@ impl std::fmt::Display for Error {
         }
     }
 }
-async fn update_question(
-    id: String,
-    store: Store,
-    question: Question
-) -> Result<impl warp::Reply, warp::Rejection> {
-    match store.questions.write().await.get_mut(&QuestionId(id)) {
-        Some(q) => *q = question,
-        None => return Err(warp::reject::custom(Error::QuestionNotFound)),
-    }
-    
-    Ok(warp::reply::with_status(
-        "Question updated",
-        StatusCode::OK,
-    ))
-}
-
 
 impl Reject for Error {}
 
@@ -118,6 +114,58 @@ async fn add_question(
     ))
 }
 
+async fn update_question(
+    id: String,
+    store: Store,
+    question: Question
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match store.questions.write().await.get_mut(&QuestionId(id)) {
+        Some(q) => *q = question,
+        None => return Err(warp::reject::custom(Error::QuestionNotFound)),
+    }
+    
+    Ok(warp::reply::with_status(
+        "Question updated",
+        StatusCode::OK,
+    ))
+}
+
+async fn delete_question(
+    id: String,
+    store: Store,
+) 0> Result<impl warp::Reply, warp::Rejection> {
+    match store.questions.write().await.remove(&QuestionId(id)){
+        Some(_) => {
+            return Ok(
+                warp::reply::with_status(
+                    "Question deleted",
+                    StatusCode::OK
+                )
+            )
+        },
+        None => return Err(warp::reject::custom(Error::QuestionNotFound)),
+    }
+}
+
+async fn add_answer(
+    store: Store,
+    params: HashMap<String, String>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let answer = Answer {
+        id: AnswerId("1".to_string()),
+        content: params.get("content").unwrap().to_string(),
+        question_id: QuestionId(params.get("questionId").unwrap().to_string()),
+    };
+
+    store
+        .answers
+        .write()
+        .await
+        .insert(answer.id.clone(), answer);
+
+    Ok(warp::reply::with_status("Answer added", StatusCode::OK))
+}
+
 async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(error) = r.find::<Error>() {
         Ok(warp::reply::with_status(
@@ -128,6 +176,11 @@ async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
         Ok(warp::reply::with_status(
             error.to_string(),
             StatusCode::FORBIDDEN,
+        ))
+    } else if let Some(error) = r.find::<BodyDeserializeError>() {
+        Ok(warp::reply::with_status(
+            error.to_string(),
+            StatusCode::UNPROCESSABLE_ENTITY,
         ))
     } else {
         Ok(warp::reply::with_status(
@@ -191,9 +244,25 @@ async fn main() {
         .and(warp::body::json())
         .and_then(update_question);
 
+    let delete_question = warp::delete()
+        .and(warp::path("questions"))
+        .and(warp::path::param::<String>())
+        .and(warp::path::end())
+        .and(store_filter.clone())
+        .and_then(delete_question);
+
+    let add_answer = warp::post()
+        .and(warp::path("answqers"))
+        .and(warp::path::end())
+        .and(store_filter.clone())
+        .and(warp::body::form())
+        .and_then(add_answer);
+
     let routes = get_questions
         .or(add_question)
         .or(update_question)
+        .or(add_answer)
+        .or(delete_question)
         .with(cors)
         .recover(return_error);
 
